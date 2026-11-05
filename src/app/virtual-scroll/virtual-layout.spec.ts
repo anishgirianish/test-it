@@ -57,6 +57,18 @@ describe('computeVirtualLayout', () => {
     expect(Math.abs(l.offset + (idx - l.start) * 36)).toBeLessThan(1); // lands at the top
   });
 
+  it('applies the sub-pixel adjust to the virtual position', () => {
+    const sizes = fixed(1_000_000);
+    const scale = computeVirtualLayout({ ...base, sizes, scrollTop: 0 }).scale;
+    const wantVirtual = 250_000 * 36; // not representable as whole DOM px once scaled
+    const domTop = Math.floor(wantVirtual / scale);
+    const adjust = wantVirtual - domTop * scale;
+    const l = computeVirtualLayout({ ...base, sizes, scrollTop: domTop, adjust });
+    expect(l.virtualTop).toBeCloseTo(wantVirtual, 6);
+    expect(l.offset + (250_000 - l.start) * 36).toBeCloseTo(0, 6);
+    expect(computeVirtualLayout({ ...base, sizes, scrollTop: 0, adjust: -5 }).virtualTop).toBe(0);
+  });
+
   it('covers the body with variable row heights', () => {
     const heights = Array.from({ length: 500 }, (_, i) => (i % 7 === 0 ? 120 : i % 3 === 0 ? 54 : 36));
     const sizes = new VirtualSizeCache(heights.length, (i) => heights[i]);

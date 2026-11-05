@@ -17,6 +17,12 @@ export interface VirtualLayoutInput {
   buffer: number;
   /** Cap for the scrollable height; beyond it the scrollbar is scaled. */
   maxDomHeight: number;
+  /**
+   * Virtual px added to the scroll position. `scrollTop` is an integer in most
+   * browsers; with a scaled scrollbar one DOM px is several virtual px, so a
+   * programmatic scroll keeps its sub-pixel remainder here to land exactly.
+   */
+  adjust?: number;
 }
 
 export interface VirtualLayout {
@@ -49,7 +55,7 @@ export function computeVirtualLayout(i: VirtualLayoutInput): VirtualLayout {
   const scale = maxDomScroll > 0 ? maxVirtualScroll / maxDomScroll : 1;
 
   const domTop = Math.min(Math.max(0, i.scrollTop), maxDomScroll);
-  const virtualTop = domTop * scale;
+  const virtualTop = Math.min(Math.max(0, domTop * scale + (i.adjust ?? 0)), maxVirtualScroll);
   const buffer = Math.max(0, i.buffer);
 
   if (count === 0) {

@@ -73,7 +73,13 @@ columns: ColumnDef<Trade>[] = [
 | `sort` | `[]` | Two-way bindable `SortState[]`. |
 | `multiSort` | `true` | Shift/Ctrl/Cmd-click adds a sort key. |
 | `clientSort` | `true` | `false` = emit `sort` only, you order the data. |
-| `rowHeight` / `headerHeight` | `36` / `40` | Pixels. All rows share one height. |
+| `rowHeight` | `36` | Data row height in px, or a resolver `(row, index) => px` giving each row its own estimate. |
+| `groupRowHeight` | `rowHeight` | Group rows can be taller or shorter than data rows. |
+| `dynamicRowHeight` | `false` | Measure rendered rows; any row may then be any height (wrapped text, images, detail rows). |
+| `detailRowHeight` | `120` | Estimate for a detail row until it is measured. |
+| `expanded` | `new Set()` | Two-way bindable set of row keys (from `trackBy`) whose detail row is open. |
+| `expandOnRowClick` | `false` | Toggle the detail row when the row is clicked. |
+| `headerHeight` | `40` | Pixels. |
 | `height` | `'100%'` | CSS height of the host. |
 | `buffer` | `16` | Rows rendered above and below the viewport. |
 | `collapsedByDefault` | `false` | Initial group state. |
@@ -84,11 +90,69 @@ columns: ColumnDef<Trade>[] = [
 
 ### Outputs
 
-`rowClick`, `groupToggle`, `renderedRangeChange`, `sortChange` (from the `sort` model).
+`rowClick`, `groupToggle`, `rowExpand`, `renderedRangeChange`, `sortChange` and `expandedChange` (from the models).
 
 ### Methods
 
-`scrollToIndex(i)`, `scrollToTop()`, `expandAll()`, `collapseAll()`, `expandToLevel(n)`, `viewportElement`.
+`scrollToIndex(i, { align?: 'start' | 'center' | 'end', offset? })`, `scrollToRow(predicate, options?)`, `scrollToTop()`,
+`expandAll()`, `collapseAll()`, `expandToLevel(n)`, `isRowExpanded(row)`, `toggleRowExpanded(row)`, `setRowExpanded(row, bool)`,
+`collapseAllRows()`, `viewportElement`.
+
+Column flags that matter for heights: `wrap: true` lets a column's text wrap (needs `dynamicRowHeight`);
+`expander: true` renders the expand/collapse caret for detail rows in that column.
+
+### Variable row heights
+
+Every row can have its own height. There are three layers, and you use as many as you need:
+
+1. **Per-type heights, no measuring.** `rowHeight` is a number, `groupRowHeight` another. Rows are exactly that tall.
+2. **Height resolver.** `[rowHeight]="(row) => row.notes ? 54 : 36"` gives each row an estimate up front.
+   Without `dynamicRowHeight` this *is* the height (`<tr>` gets it as `height`, which for table rows is a minimum).
+3. **Measured heights.** `[dynamicRowHeight]="true"`: rendered rows are measured and the estimate is replaced.
+   Use it for `wrap: true` columns, detail rows, or cells hosting components whose height you don't know.
+
+```html
+<dt-table [data]="rows()" [columns]="columns" [rowHeight]="estimate" [groupRowHeight]="44"
+          [dynamicRowHeight]="true" [trackBy]="byId" [(expanded)]="expanded">
+  <!-- detail row under an expanded data row; any height, measured -->
+  <ng-template dtDetail [dtDetailOf]="rows()" let-row let-index="index">
+    <app-trade-details [trade]="row" />
+  </ng-template>
+</dt-table>
+```
+
+```ts
+columns: ColumnDef<Trade>[] = [
+  { key: 'id', width: 110, sticky: 'start', expander: true },   // caret lives here
+  { key: 'notes', width: 260, wrap: true },                     // wraps; row grows
+];
+estimate = (row: Trade) => (row.notes.length > 120 ? 90 : row.notes.length > 50 ? 54 : 36);
+```
+
+How it stays accurate:
+
+- **Height cache.** `VirtualSizeCache` holds an estimate per row (constant or from the resolver) and a
+  measured size for every row that has been on screen. Measured wins.
+- **Prefix sums.** Offsets are kept in a Fenwick tree: offset lookup, "which row is at pixel y" and a
+  single measurement update are all O(log n). 8 bytes per row, allocated only once heights stop being
+  uniform; a constant `rowHeight` with no measuring allocates nothing.
+- **Measurement.** `*dtVirtualFor` reads each rendered view's height (a view may be a row plus its detail
+  row; the heights are summed) synchronously after every scroll, after every render pass, and whenever a
+  ResizeObserver reports a row resized (text re-wrapping, images loading, a component expanding).
+- **Scroll position correction.** When a measurement changes the height of something above the first
+  visible row, the scroll position is moved by the same amount in the same frame, so what you look at
+  does not move. At the end of the list the bottom edge is anchored instead. A row expanding below the
+  first visible row simply pushes the rest down, as you would expect.
+- **Scroll to row.** `scrollToIndex` uses the cache, keeps re-aiming for a few hundred milliseconds while
+  the rows around the target are measured for the first time, and supports `align: 'center' | 'end'`.
+  The browser rounds `scrollTop` to whole pixels; with a scaled scrollbar (millions of rows) one DOM pixel
+  is several content pixels, so the remainder is kept separately and landings are exact anyway.
+- **Rebuilds.** When the row list changes (sort, group toggle, expand) measurements carry over for rows
+  whose estimate did not change, and the first visible row is anchored across the rebuild.
+
+Expansion state is keyed by `trackBy`, so it survives sorting, grouping and scrolling. The detail
+panel is `position: sticky; left: 0` and sized to the viewport, so it stays in view while the table
+scrolls horizontally.
 
 ### Theming
 
@@ -120,15 +184,29 @@ depend on the data-table component, and the table keeps owning its own markup an
 <button (click)="vs.scrollToIndex(123456)">Jump</button>
 ```
 
-Requirements: every row the same height (`itemSize`), and `position: sticky` cells need
-`border-collapse: separate` on the table.
+Requirement: `position: sticky` cells need `border-collapse: separate` on the table.
 
-`dtVirtualScroll` inputs: `itemSize`, `headerSize`, `buffer` (16), `maxDomHeight` (12M px),
-`placeholderLine` (colour of the empty-row lines). Output: `rangeChange`. Exposed via
-`#vs="dtVirtualScroll"`: `range()`, `scale()`, `scrollToIndex(i)`, `scrollToTop()`, `element`.
+Rows of different heights: give `*dtVirtualFor` an estimate per item and let the scroller measure.
 
-`*dtVirtualFor` context: `$implicit`, `index` (absolute), `count`, `first`, `last`, `even`, `odd`.
-DOM rows are recycled by slot, so cell templates must not keep per-row state.
+```html
+<div dtVirtualScroll [itemSize]="32" [measure]="true">
+  <table>
+    <tbody>
+      <tr *dtVirtualFor="let row of rows; itemSize: estimate; trackBy: byId">…</tr>
+    </tbody>
+  </table>
+</div>
+```
+
+`dtVirtualScroll` inputs: `itemSize` (default estimate), `headerSize`, `buffer` (16), `measure` (false),
+`maxDomHeight` (12M px), `placeholderLine` (colour of the empty-row lines). Output: `rangeChange`.
+Exposed via `#vs="dtVirtualScroll"`: `range()`, `scale()`, `totalSize()`, `sizeOf(i)`, `offsetOf(i)`,
+`indexAt(px)`, `scrollToIndex(i, { align, offset })`, `scrollToOffset(px)`, `scrollToTop()`, `element`.
+If you don't use `*dtVirtualFor`, call `setSource(count, estimateFn)` and feed heights to `applySizes([...])`.
+
+`*dtVirtualFor` inputs: `trackBy` (keyed rows, see below) and `itemSize` (`(item, index) => px`).
+Context: `$implicit`, `index` (absolute), `count`, `first`, `last`, `even`, `odd`.
+Without `trackBy` DOM rows are recycled by slot, so cell templates must not keep per-row state.
 
 ## Third-party components and overlays in cells
 
@@ -161,16 +239,18 @@ to fit your tallest cell component, or keep the tall content in an overlay as ab
 
 ## How the virtual scroller works
 
-`src/app/virtual-scroll/virtual-layout.ts` holds the pure math; `virtual-scroll.directive.ts` the DOM.
+`virtual-sizes.ts` is the height cache (Fenwick tree), `virtual-layout.ts` the pure layout math,
+`virtual-scroll.directive.ts` the DOM and scroll handling, `virtual-for.directive.ts` the row views and measuring.
 
 1. On first render `dtVirtualScroll` wraps the container's existing children in three divs it creates:
-   a sizer (sets the scroll height: `header + rows × itemSize`, capped at `maxDomHeight`),
+   a sizer (sets the scroll height: `header + total row height`, capped at `maxDomHeight`),
    a zero-height `position: sticky; top: 0` layer pinned to the viewport top, and an absolutely
    positioned content block that holds your table. Your markup is moved, not changed.
 2. On scroll the visible index range is derived from `scrollTop`; past the cap a scale factor maps DOM
    pixels to virtual pixels and the wheel is divided by the same factor so it feels normal.
-3. The content block is offset by `start × itemSize − virtualTop` (a small negative number) so the
-   first rendered row lands on the exact pixel the scroll position implies. `top` is used instead of
+3. The content block is offset by `offset(start) − virtualTop` (a small negative number) so the
+   first rendered row lands on the exact pixel the scroll position implies. With uniform rows
+   `offset(i)` is `i × itemSize`; otherwise it comes from the height cache. `top` is used instead of
    `transform`, so `position: sticky` on the header and pinned columns keeps working.
 4. Because the pinned layer is honoured by the compositor without the main thread, a fast scrollbar
    drag cannot scroll the rendered rows out of view: you see stale rows for a frame, never white.
@@ -178,6 +258,8 @@ to fit your tallest cell component, or keep the tall content in an overlay as ab
    rebinds text instead of creating DOM.
 6. Change detection runs synchronously inside the scroll handler so the new window is painted in the
    same frame; a repeating gradient on the sizer draws placeholder row lines as a last resort.
+7. With `measure` on, the newly rendered rows are measured right after that change detection, still
+   before paint, and any correction to the scroll position lands in the same frame.
 
 Sorting and grouping in the data-table component are plain `computed` signals: data → sorted (group
 keys first, then user sort) → group tree with aggregates → flattened list honouring collapsed state →

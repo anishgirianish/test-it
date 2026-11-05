@@ -104,6 +104,8 @@ export class DtVirtualScroll {
 
   readonly count = computed(() => this.source().count);
   readonly scrollTop = signal(0);
+  /** Sub-pixel remainder of the last programmatic scroll, in virtual px. */
+  private readonly adjust = signal(0);
   readonly viewportHeight = signal(0);
   readonly viewportWidth = signal(0);
   readonly contentWidth = signal(0);
@@ -137,6 +139,7 @@ export class DtVirtualScroll {
       scrollTop: this.scrollTop(),
       buffer: this.buffer(),
       maxDomHeight: this.maxDomHeight(),
+      adjust: this.adjust(),
     });
   });
 
@@ -193,8 +196,8 @@ export class DtVirtualScroll {
     if (!this.sizer || count === 0 || anchorIndex >= count || this.pendingScroll) return;
     const cache = untracked(() => this.sizes());
     const after = untracked(() => this.layout());
-    const wanted = scrollTopForVirtual(cache.offset(anchorIndex) + anchorIntra, after.scale);
-    if (Math.abs(wanted - this.element.scrollTop) >= 0.5) this.setScrollTop(wanted);
+    const wanted = cache.offset(anchorIndex) + anchorIntra;
+    if (Math.abs(wanted - after.virtualTop) >= 0.01) this.setScrollVirtual(wanted, after.scale);
   }
 
   /** Current size of item `index` (measured if known, otherwise the estimate). */
@@ -237,6 +240,7 @@ export class DtVirtualScroll {
     const before = untracked(() => this.layout());
     const anchorIndex = before.first;
     const anchorIntra = before.virtualTop - cache.offset(anchorIndex);
+    const atBottom = this.isAtBottom(before);
 
     let changed = false;
     for (const { index, size } of entries) {
@@ -245,20 +249,34 @@ export class DtVirtualScroll {
     if (!changed) return false;
 
     this.sizeVersion.update((v) => v + 1);
-    const el = this.element;
     const after = untracked(() => this.layout());
 
     if (this.pendingScroll && performance.now() > this.pendingScroll.until) this.pendingScroll = null;
     if (this.pendingScroll) {
       // A scrollToIndex is still settling: re-aim at the (now better known) target.
       const { index, options } = this.pendingScroll;
-      this.setScrollTop(this.targetFor(index, options, after));
+      this.setScrollVirtual(this.targetFor(index, options), after.scale);
+    } else if (atBottom) {
+      // The user is at the end of the list: keep showing the end.
+      this.setScrollVirtual(this.maxVirtualTop(), after.scale);
     } else if (anchorIndex < cache.count) {
-      const wanted = scrollTopForVirtual(cache.offset(anchorIndex) + anchorIntra, after.scale);
-      if (Math.abs(wanted - el.scrollTop) >= 0.5) this.setScrollTop(wanted);
+      const wanted = cache.offset(anchorIndex) + anchorIntra;
+      if (Math.abs(wanted - after.virtualTop) >= 0.01) this.setScrollVirtual(wanted, after.scale);
     }
     this.pushGeometry();
     return true;
+  }
+
+  /** Whether the scroll position sits at the very end (within one DOM px). */
+  private isAtBottom(layout: VirtualLayout): boolean {
+    const el = this.element;
+    const maxDomScroll = layout.sizerHeight - el.clientHeight;
+    return maxDomScroll > 0 && el.scrollTop >= maxDomScroll - 1;
+  }
+
+  private maxVirtualTop(): number {
+    const bodyView = Math.max(0, untracked(() => this.viewportHeight()) - untracked(() => this.headerSize()));
+    return Math.max(0, untracked(() => this.sizes()).total() - bodyView);
   }
 
   // ----------------------------------------------------------- scrolling
@@ -270,31 +288,42 @@ export class DtVirtualScroll {
     const clamped = Math.max(0, Math.min(index, count - 1));
     // Keep re-aiming while the rows around the target are measured for the first time.
     this.pendingScroll = { index: clamped, options, until: performance.now() + PENDING_SCROLL_MS };
-    this.setScrollTop(this.targetFor(clamped, options, untracked(() => this.layout())));
+    this.setScrollVirtual(this.targetFor(clamped, options), untracked(() => this.layout()).scale);
   }
 
   /** Scroll to a virtual (content) pixel position. */
   scrollToOffset(virtualPx: number): void {
     this.pendingScroll = null;
-    this.setScrollTop(scrollTopForVirtual(Math.max(0, virtualPx), untracked(() => this.layout()).scale));
+    this.setScrollVirtual(Math.max(0, virtualPx), untracked(() => this.layout()).scale);
   }
 
   scrollToTop(): void {
     this.pendingScroll = null;
-    this.setScrollTop(0);
+    this.setScrollVirtual(0, 1);
   }
 
-  private targetFor(index: number, options: ScrollToIndexOptions, layout: VirtualLayout): number {
+  /** Virtual top that shows `index` as requested, given the current cache. */
+  private targetFor(index: number, options: ScrollToIndexOptions): number {
     const cache = untracked(() => this.sizes());
     const bodyView = Math.max(0, untracked(() => this.viewportHeight()) - untracked(() => this.headerSize()));
-    return scrollTopForVirtual(virtualTopForIndex(cache, index, bodyView, options), layout.scale);
+    return virtualTopForIndex(cache, index, bodyView, options);
   }
 
-  private setScrollTop(value: number): void {
+  /**
+   * Programmatic scroll to an exact virtual position. The browser snaps
+   * `scrollTop` to whole pixels; the remainder goes into `adjust` so the
+   * layout still lands exactly, even with a scaled scrollbar.
+   */
+  private setScrollVirtual(virtualTop: number, scale: number): void {
     const el = this.element;
-    el.scrollTop = value;
+    el.scrollTop = scrollTopForVirtual(virtualTop, scale);
     this.lastProgrammaticTop = el.scrollTop;
+    this.adjust.set(0);
     this.scrollTop.set(el.scrollTop);
+    // Compare against what the layout actually derives (it clamps to its own
+    // maximum, which can differ from the browser's by a pixel) and keep the rest.
+    const got = untracked(() => this.layout()).virtualTop;
+    if (Math.abs(virtualTop - got) >= 0.001) this.adjust.set(virtualTop - got);
   }
 
   private pushGeometry(): void {
@@ -353,7 +382,11 @@ export class DtVirtualScroll {
     // --- scroll: render the new window in this frame, not after the scheduler
     const onScroll = () => {
       const top = el.scrollTop;
-      if (Math.abs(top - this.lastProgrammaticTop) > 1) this.pendingScroll = null; // the user took over
+      if (top !== this.lastProgrammaticTop) {
+        // The user took over: drop the programmatic sub-pixel remainder and any pending target.
+        this.adjust.set(0);
+        if (Math.abs(top - this.lastProgrammaticTop) > 1) this.pendingScroll = null;
+      }
       this.scrollTop.set(top);
       this.cdr.detectChanges();
       // New rows are in the DOM: measure them now so a correction lands before paint.
