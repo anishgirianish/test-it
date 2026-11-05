@@ -1,0 +1,151 @@
+<div
+  class="dt-viewport"
+  dtVirtualScroll
+  [itemSize]="rowHeight()"
+  [headerSize]="headerHeight()"
+  [buffer]="buffer()"
+  (rangeChange)="renderedRangeChange.emit($event)"
+  tabindex="0"
+  role="region"
+  aria-label="Data table"
+>
+  @let metas = columnMeta();
+  @let total = rows().length;
+  @let ind = indent();
+
+    <table
+      class="dt-table"
+      [class.dt-striped]="striped()"
+      [style.width.px]="totalWidth()"
+      [attr.aria-rowcount]="total"
+      [attr.aria-colcount]="metas.length"
+    >
+      <colgroup>
+        @for (m of metas; track m.column.key) {
+          <col [style.width.px]="m.width" />
+        }
+      </colgroup>
+
+      <thead>
+        <tr [style.height.px]="headerHeight()">
+          @for (m of metas; track m.column.key) {
+            @let col = m.column;
+            @let s = sortFor(col.key);
+            @let ht = headerTemplate(col.key);
+            <th
+              scope="col"
+              [class]="m.headerClass"
+              [class.dt-sorted]="!!s"
+              [style.left.px]="m.left"
+              [style.right.px]="m.right"
+              [attr.aria-sort]="ariaSort(m)"
+            >
+              @if (m.sortable) {
+                <button type="button" class="dt-header-btn" (click)="onHeaderClick(m, $event)">
+                  <span class="dt-header-text">
+                    @if (ht) {
+                      <ng-container *ngTemplateOutlet="ht; context: { $implicit: col, sort: s, sortIndex: sortIndex(col.key) }" />
+                    } @else {
+                      {{ col.header ?? col.key }}
+                    }
+                  </span>
+                  <span class="dt-sort-indicator" aria-hidden="true">
+                    @if (s) {
+                      <span class="dt-sort-arrow">{{ s.direction === 'asc' ? '▲' : '▼' }}</span>
+                      @if (sort().length > 1) {
+                        <span class="dt-sort-order">{{ sortIndex(col.key) + 1 }}</span>
+                      }
+                    } @else {
+                      <span class="dt-sort-arrow dt-sort-arrow--idle">⇅</span>
+                    }
+                  </span>
+                </button>
+              } @else {
+                <span class="dt-header-text dt-header-static">
+                  @if (ht) {
+                    <ng-container *ngTemplateOutlet="ht; context: { $implicit: col, sort: null, sortIndex: -1 }" />
+                  } @else {
+                    {{ col.header ?? col.key }}
+                  }
+                </span>
+              }
+            </th>
+          }
+        </tr>
+      </thead>
+
+      <tbody>
+        @if (total === 0) {
+          <tr class="dt-row dt-empty-row" [style.height.px]="rowHeight()">
+            <td [attr.colspan]="metas.length">{{ emptyMessage() }}</td>
+          </tr>
+        }
+        <ng-container *dtVirtualFor="let row of rows(); let abs = index; trackBy: rowTrackBy()">
+          @if (isGroup(row)) {
+            @let expanded = isExpanded(row);
+            <tr
+              class="dt-row dt-group-row"
+              [class.dt-expanded]="expanded"
+              [class.dt-odd]="abs % 2 === 1"
+              [style.height.px]="rowHeight()"
+              [attr.aria-rowindex]="abs + 1"
+              [attr.aria-level]="row.level + 1"
+              [attr.aria-expanded]="expanded"
+              (click)="onRowClick(row, abs, $event)"
+            >
+              @let gl = groupLabelMeta();
+              @let span = groupLabelSpan();
+              <td [class]="gl.cellClass" [style.left.px]="gl.left" [attr.colspan]="span">
+                <span class="dt-group-cell" [style.padding-left.px]="row.level * ind">
+                  <button
+                    type="button"
+                    class="dt-toggle"
+                    [attr.aria-label]="(expanded ? 'Collapse ' : 'Expand ') + row.label"
+                    (click)="toggleGroup(row, $event)"
+                  >
+                    <span class="dt-caret" [class.dt-caret--open]="expanded"></span>
+                  </button>
+                  @let gt = groupTemplate(row.key);
+                  @if (gt) {
+                    <ng-container *ngTemplateOutlet="gt; context: { $implicit: row, expanded: expanded, column: gl.column }" />
+                  } @else {
+                    <span class="dt-group-label">{{ row.label }}</span>
+                    <span class="dt-group-count">({{ row.count }})</span>
+                  }
+                </span>
+              </td>
+              @for (m of metas; track m.column.key; let ci = $index) {
+                @if (ci >= span) {
+                  <td [class]="m.cellClass" [style.left.px]="m.left" [style.right.px]="m.right">
+                    @if (m.column.aggregate) {
+                      <span class="dt-aggregate">{{ aggregateText(row, m.column) }}</span>
+                    }
+                  </td>
+                }
+              }
+            </tr>
+          } @else {
+            <tr
+              class="dt-row dt-data-row"
+              [class.dt-odd]="abs % 2 === 1"
+              [style.height.px]="rowHeight()"
+              [attr.aria-rowindex]="abs + 1"
+              (click)="onRowClick(row, abs, $event)"
+            >
+              @for (m of metas; track m.column.key) {
+                @let value = cellValue(row, m.column);
+                @let ct = cellTemplate(m.column.key);
+                <td [class]="cellClasses(m, row, value)" [style.left.px]="m.left" [style.right.px]="m.right">
+                  @if (ct) {
+                    <ng-container *ngTemplateOutlet="ct; context: { $implicit: row, value: value, column: m.column, index: abs }" />
+                  } @else {
+                    {{ cellText(value, m.column, row) }}
+                  }
+                </td>
+              }
+            </tr>
+          }
+        </ng-container>
+      </tbody>
+    </table>
+</div>

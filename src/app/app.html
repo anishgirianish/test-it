@@ -1,0 +1,144 @@
+<main class="page">
+  <nav class="tabs">
+    <button type="button" class="tab" [class.tab--on]="view() === 'blotter'" (click)="view.set('blotter')">Data table component</button>
+    <button type="button" class="tab" [class.tab--on]="view() === 'plain'" (click)="view.set('plain')">Any table + virtual viewport</button>
+  </nav>
+
+  @if (view() === 'plain') {
+    <app-plain-table-demo class="plain-demo" />
+  } @else {
+  <header class="toolbar">
+    <div class="toolbar__title">
+      <h1>Trade blotter</h1>
+      <span class="muted">{{ rowCount() | number }} rows generated in {{ generateMs() }} ms · native &lt;table&gt;, no CDK</span>
+    </div>
+
+    <div class="toolbar__row">
+      <label class="control">
+        Rows
+        <select (change)="setRowCount($any($event.target).value)">
+          @for (n of rowCountOptions; track n) {
+            <option [value]="n" [selected]="n === rowCount()">{{ n | number }}</option>
+          }
+        </select>
+      </label>
+
+      <label class="control">
+        Row height
+        <input type="range" min="28" max="56" step="4" [value]="rowHeight()" (input)="rowHeight.set(+$any($event.target).value)" />
+        <span class="mono">{{ rowHeight() }}px</span>
+      </label>
+
+      <label class="control check"><input type="checkbox" [checked]="stickyEnabled()" (change)="stickyEnabled.set(!stickyEnabled())" /> Sticky columns</label>
+      <label class="control check"><input type="checkbox" [checked]="showExtraColumns()" (change)="showExtraColumns.set(!showExtraColumns())" /> Computed columns</label>
+      <label class="control check"><input type="checkbox" [checked]="showActions()" (change)="showActions.set(!showActions())" /> Actions column</label>
+      <label class="control check"><input type="checkbox" [checked]="striped()" (change)="striped.set(!striped())" /> Striped</label>
+      <label class="control check"><input type="checkbox" [checked]="multiSort()" (change)="multiSort.set(!multiSort())" /> Multi-sort (shift+click)</label>
+      <label class="control check" title="On: DOM rows are reused by slot (fastest). Off: rows are keyed by id so stateful cell components travel with their data."><input type="checkbox" [checked]="recycleRows()" (change)="recycleRows.set(!recycleRows())" /> Recycle rows</label>
+    </div>
+
+    <div class="toolbar__row">
+      <span class="label">Group by</span>
+      @for (g of groupOptions; track g) {
+        <button type="button" class="chip" [class.chip--on]="groupBy().includes(g)" (click)="toggleGroup(g)">
+          @if (groupBy().includes(g)) {
+            <span class="chip__order">{{ groupBy().indexOf(g) + 1 }}</span>
+          }
+          {{ g }}
+        </button>
+      }
+      @if (groupBy().length) {
+        <button type="button" class="btn" (click)="expandAll()">Expand all</button>
+        <button type="button" class="btn" (click)="collapseAll()">Collapse all</button>
+      }
+
+      <span class="spacer"></span>
+
+      <label class="control">
+        Scroll to row
+        <input type="number" min="0" [value]="scrollTarget()" (input)="scrollTarget.set(+$any($event.target).value)" (keydown.enter)="scrollTo()" />
+      </label>
+      <button type="button" class="btn btn--primary" (click)="scrollTo()">Go</button>
+    </div>
+  </header>
+
+  <dt-table
+    #table
+    class="blotter"
+    [data]="data()"
+    [columns]="columns()"
+    [groupBy]="groupBy()"
+    [(sort)]="sort"
+    [multiSort]="multiSort()"
+    [rowHeight]="rowHeight()"
+    [striped]="striped()"
+    [trackBy]="trackById"
+    [recycleRows]="recycleRows()"
+    (rowClick)="onRowClick($event)"
+    (renderedRangeChange)="onRange($event)"
+  >
+    <!-- Dynamic cell content: templates keyed by column -->
+    <ng-template dtCell="symbol" [dtCellOf]="data()" let-row>
+      <span class="sym">
+        <span class="sym__dot" [attr.data-sector]="row.sector"></span>
+        <strong>{{ row.symbol }}</strong>
+      </span>
+    </ng-template>
+
+    <ng-template dtCell="side" let-value="value">
+      <span class="badge" [class.badge--buy]="value === 'Buy'" [class.badge--sell]="value === 'Sell'">{{ value }}</span>
+    </ng-template>
+
+    <ng-template dtCell="status" let-value="value">
+      <span class="status" [attr.data-status]="value">{{ value }}</span>
+    </ng-template>
+
+    <ng-template dtCell="fillPct" let-value="value">
+      <span class="fill">
+        <span class="fill__bar"><span class="fill__val" [style.width.%]="value"></span></span>
+        <span class="mono">{{ value }}%</span>
+      </span>
+    </ng-template>
+
+    <!-- A stateful "third-party" component with a position:fixed popover -->
+    <ng-template dtCell="details" [dtCellOf]="data()" let-row>
+      <app-info-chip
+        label="Details"
+        [title]="row.symbol + ' · ' + row.name"
+        [detail]="row.side + ' ' + row.qty + ' @ ' + row.price + ' · ' + row.trader + ' · ' + row.account"
+      />
+    </ng-template>
+
+    <ng-template dtCell="actions" [dtCellOf]="data()" let-row>
+      <span class="actions">
+        <button type="button" class="icon-btn" title="View" (click)="action('view', row, $event)">👁</button>
+        <button type="button" class="icon-btn" title="Edit" (click)="action('edit', row, $event)">✎</button>
+        <button type="button" class="icon-btn" title="Cancel" (click)="action('cancel', row, $event)">✕</button>
+      </span>
+    </ng-template>
+
+    <!-- Custom header -->
+    <ng-template dtHeader="pnl" let-column let-sort="sort">
+      <span class="hdr-pnl">{{ column.header }} <small class="muted">USD</small></span>
+    </ng-template>
+
+    <!-- Group label for sector groups only; other levels use the default -->
+    <ng-template dtGroup="sector" [dtGroupOf]="data()" let-group let-expanded="expanded">
+      <span class="sym__dot" [attr.data-sector]="group.value"></span>
+      <strong>{{ group.label }}</strong>
+      <span class="muted">· {{ group.count | number }} trades · {{ compact(group.aggregates['notional']) }} notional</span>
+    </ng-template>
+  </dt-table>
+
+  <footer class="statusbar">
+    <span>Rendering rows <span class="mono">{{ range().start | number }}–{{ range().end | number }}</span> of <span class="mono">{{ range().total | number }}</span></span>
+    <span>Sort: <span class="mono">{{ sortSummary() }}</span></span>
+    @if (selected(); as s) {
+      <span>Selected: <span class="mono">#{{ s.id }} {{ s.symbol }} {{ s.side }} {{ s.qty | number }} @ {{ s.price | number: '1.2-2' }}</span></span>
+    }
+    @if (log().length) {
+      <span class="muted">Actions: {{ log().join(' · ') }}</span>
+    }
+  </footer>
+  }
+</main>

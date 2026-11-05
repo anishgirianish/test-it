@@ -1,0 +1,248 @@
+:host {
+  display: block;
+  min-height: 0;
+  /* Theme hooks. Override on the host element or any ancestor. */
+  --dt-font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --dt-bg: #ffffff;
+  --dt-fg: #1f2933;
+  --dt-muted: #6b7785;
+  --dt-border: #e1e5ea;
+  --dt-header-bg: #f5f7fa;
+  --dt-header-fg: #334155;
+  --dt-stripe-bg: #fafbfc;
+  --dt-hover-bg: #eef4ff;
+  --dt-group-bg: #e9eef5;
+  --dt-group-fg: #1e293b;
+  --dt-accent: #2563eb;
+  --dt-sticky-shadow: rgba(15, 23, 42, 0.14);
+  --dt-cell-padding: 0 12px;
+  --dt-radius: 6px;
+}
+
+.dt-viewport {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  /* No `contain`, `transform` or `filter` here: any of them would become the
+     containing block for position:fixed overlays (tooltips, menus) opened from cells. */
+  overscroll-behavior: contain;
+  border: 1px solid var(--dt-border);
+  border-radius: var(--dt-radius);
+  background: var(--dt-bg);
+  color: var(--dt-fg);
+  font: var(--dt-font);
+  --dtv-line: var(--dt-border);
+
+  &:focus-visible {
+    outline: 2px solid var(--dt-accent);
+    outline-offset: -2px;
+  }
+}
+
+.dt-table {
+  table-layout: fixed;
+  border-collapse: separate; /* required: sticky + collapsed borders glitch */
+  border-spacing: 0;
+}
+
+th,
+td {
+  box-sizing: border-box;
+  padding: var(--dt-cell-padding);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--dt-border);
+  background: var(--dt-bg);
+}
+
+/* ------------------------------------------------------------- header */
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--dt-header-bg);
+  color: var(--dt-header-fg);
+  font-weight: 600;
+  text-align: left;
+  border-bottom: 1px solid var(--dt-border);
+  user-select: none;
+
+  &.dt-sticky {
+    z-index: 3; /* corner: above sticky columns and header */
+  }
+}
+
+.dt-header-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  text-align: inherit;
+  cursor: pointer;
+
+  &:hover .dt-sort-arrow--idle {
+    opacity: 0.6;
+  }
+  &:focus-visible {
+    outline: 2px solid var(--dt-accent);
+    outline-offset: -2px;
+    border-radius: 3px;
+  }
+}
+
+.dt-header-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dt-header-static {
+  display: block;
+  line-height: inherit;
+}
+
+.dt-sort-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--dt-accent);
+}
+
+.dt-sort-arrow--idle {
+  opacity: 0;
+  color: var(--dt-muted);
+  transition: opacity 120ms;
+}
+
+.dt-sort-order {
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--dt-accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.dt-align-right {
+  text-align: right;
+  .dt-header-btn {
+    flex-direction: row-reverse;
+  }
+}
+.dt-align-center {
+  text-align: center;
+  .dt-header-btn {
+    justify-content: center;
+  }
+}
+
+/* ------------------------------------------------------------- body */
+.dt-striped .dt-data-row.dt-odd td {
+  background: var(--dt-stripe-bg);
+}
+
+.dt-data-row:hover td {
+  background: var(--dt-hover-bg);
+}
+
+.dt-group-row {
+  cursor: pointer;
+  td {
+    background: var(--dt-group-bg);
+    color: var(--dt-group-fg);
+    font-weight: 600;
+  }
+}
+
+.dt-group-label-cell {
+  overflow: visible; /* let the label use the merged width */
+}
+
+.dt-group-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.dt-group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dt-group-count {
+  color: var(--dt-muted);
+  font-weight: 400;
+}
+
+.dt-aggregate {
+  font-variant-numeric: tabular-nums;
+}
+
+.dt-toggle {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+
+  &:hover {
+    background: rgba(37, 99, 235, 0.12);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--dt-accent);
+  }
+}
+
+.dt-caret {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 5px 0 5px 7px;
+  border-color: transparent transparent transparent currentColor;
+  transition: transform 120ms;
+
+  &--open {
+    transform: rotate(90deg);
+  }
+}
+
+.dt-empty-row td {
+  text-align: center;
+  color: var(--dt-muted);
+}
+
+/* ----------------------------------------------------- sticky columns */
+td.dt-sticky {
+  position: sticky;
+  z-index: 1;
+}
+
+.dt-sticky-start-last {
+  box-shadow: 2px 0 4px -1px var(--dt-sticky-shadow);
+  clip-path: inset(0 -6px 0 0); /* only cast shadow to the right */
+}
+
+.dt-sticky-end-first {
+  box-shadow: -2px 0 4px -1px var(--dt-sticky-shadow);
+  clip-path: inset(0 0 0 -6px);
+}
