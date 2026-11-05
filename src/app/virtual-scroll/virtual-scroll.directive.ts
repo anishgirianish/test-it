@@ -13,7 +13,8 @@ import {
   signal,
   untracked,
 } from '@angular/core';
-import { computeVirtualLayout, scrollTopForIndex, VirtualLayout } from './virtual-layout';
+import { computeVirtualLayout, ScrollToIndexOptions, scrollTopForVirtual, VirtualLayout, virtualTopForIndex } from './virtual-layout';
+import { SizeResolver, VirtualSizeCache } from './virtual-sizes';
 
 export interface VirtualRange {
   start: number;
@@ -21,11 +22,19 @@ export interface VirtualRange {
   total: number;
 }
 
+/** One measured item, as reported by `dtVirtualFor` (or by your own code). */
+export interface MeasuredSize {
+  index: number;
+  size: number;
+}
+
 /** Chrome caps element heights at ~33.5M px, Firefox at ~17.9M px. */
 const DEFAULT_MAX_DOM_HEIGHT = 12_000_000;
+/** How long a scrollToIndex keeps correcting itself as nearby rows get measured. */
+const PENDING_SCROLL_MS = 400;
 
 /**
- * Turns an existing scroll container into a fixed-row-height virtual scroller.
+ * Turns an existing scroll container into a virtual scroller.
  * Put it on the element that scrolls; leave the table inside exactly as it is.
  * The table keeps owning its own sticky header / sticky columns CSS.
  *
@@ -38,6 +47,18 @@ const DEFAULT_MAX_DOM_HEIGHT = 12_000_000;
  *     </table>
  *   </div>
  *
+ * Row heights
+ * -----------
+ * `itemSize` is the default estimate. `*dtVirtualFor` can supply a per-item
+ * estimate (`itemSize: fn`) for rows of different types, and with `[measure]`
+ * on, rendered rows are measured and the estimates refined. Offsets live in a
+ * Fenwick tree (`VirtualSizeCache`): O(log n) lookups, O(log n) updates.
+ * When a row above the viewport turns out taller or shorter than estimated,
+ * the scroll position is corrected in the same frame so what you see does not
+ * move.
+ *
+ * Painting
+ * --------
  * On first render the directive wraps the container's children in
  *   sizer (sets the scroll height) › pinned (position: sticky, height 0) › content (absolute, offset)
  * The pinned layer is honoured by the compositor, so even a fast scrollbar
@@ -54,7 +75,7 @@ const DEFAULT_MAX_DOM_HEIGHT = 12_000_000;
   },
 })
 export class DtVirtualScroll {
-  /** Height of one row in px. Every row must use it. */
+  /** Default (estimated) row height in px. Exact when every row really is this tall. */
   readonly itemSize = input(36);
   /** Height of the sticky header inside the table (0 if none). */
   readonly headerSize = input(0);
@@ -63,6 +84,11 @@ export class DtVirtualScroll {
   readonly maxDomHeight = input(DEFAULT_MAX_DOM_HEIGHT);
   /** Colour of placeholder row lines shown where rows have not been painted yet. */
   readonly placeholderLine = input('rgba(0, 0, 0, 0.08)');
+  /**
+   * Measure rendered rows and refine the height estimates. Needed for wrapped
+   * text, expandable rows, or any content whose height is unknown up front.
+   */
+  readonly measure = input(false);
 
   readonly rangeChange = output<VirtualRange>();
 
@@ -71,26 +97,48 @@ export class DtVirtualScroll {
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly destroyRef = inject(DestroyRef);
 
-  /** Set by `dtVirtualFor`. You only set it yourself when not using that directive. */
-  readonly count = signal(0);
+  /** Item count + per-item estimate. Set by `dtVirtualFor`, or by you via `setSource`. */
+  private readonly source = signal<{ count: number; resolver: SizeResolver | null }>({ count: 0, resolver: null });
+  /** Bumped whenever a measurement changed the cache. */
+  private readonly sizeVersion = signal(0);
+
+  readonly count = computed(() => this.source().count);
   readonly scrollTop = signal(0);
   readonly viewportHeight = signal(0);
+  readonly viewportWidth = signal(0);
   readonly contentWidth = signal(0);
 
   private sizer: HTMLElement | null = null;
   private content: HTMLElement | null = null;
+  private readonly measurers = new Set<() => boolean>();
+  /** A scroll request we keep honouring while measurements refine the target. */
+  private pendingScroll: { index: number; options: ScrollToIndexOptions; until: number } | null = null;
+  private lastProgrammaticTop = -1;
+  private lastCache: VirtualSizeCache | null = null;
 
-  readonly layout = computed<VirtualLayout>(() =>
-    computeVirtualLayout({
-      count: this.count(),
-      itemSize: this.itemSize(),
+  /**
+   * Height cache: estimates refined by measurements. Rebuilt whenever the
+   * item list or the estimate changes; measurements carry over for items
+   * whose estimate did not change (same count only).
+   */
+  readonly sizes = computed(() => {
+    const { count, resolver } = this.source();
+    const cache = new VirtualSizeCache(count, resolver ?? this.itemSize(), this.lastCache);
+    this.lastCache = cache;
+    return cache;
+  });
+
+  readonly layout = computed<VirtualLayout>(() => {
+    this.sizeVersion();
+    return computeVirtualLayout({
+      sizes: this.sizes(),
       headerSize: this.headerSize(),
       viewportHeight: this.viewportHeight(),
       scrollTop: this.scrollTop(),
       buffer: this.buffer(),
       maxDomHeight: this.maxDomHeight(),
-    }),
-  );
+    });
+  });
 
   /** Rendered index window. */
   readonly range = computed<VirtualRange>(() => {
@@ -100,6 +148,12 @@ export class DtVirtualScroll {
 
   /** Virtual px per DOM px; > 1 only for very long lists. */
   readonly scale = computed(() => this.layout().scale);
+
+  /** Total content height in virtual px (sum of all row heights). */
+  readonly totalSize = computed(() => {
+    this.sizeVersion();
+    return this.sizes().total();
+  });
 
   constructor() {
     afterNextRender(() => this.attach());
@@ -111,16 +165,9 @@ export class DtVirtualScroll {
 
     // Push geometry to the wrapper elements we created.
     effect(() => {
-      const { sizerHeight, offset } = this.layout();
-      const width = this.contentWidth();
-      const sizer = this.sizer;
-      const content = this.content;
-      if (!sizer || !content) return;
-      untracked(() => {
-        sizer.style.height = `${sizerHeight}px`;
-        sizer.style.width = width ? `${width}px` : '';
-        content.style.top = `${offset}px`;
-      });
+      this.layout();
+      this.contentWidth();
+      untracked(() => this.pushGeometry());
     });
   }
 
@@ -128,14 +175,144 @@ export class DtVirtualScroll {
     return this.host.nativeElement;
   }
 
-  /** Scroll so that item `index` is at the top of the body area. */
-  scrollToIndex(index: number): void {
-    const clamped = Math.max(0, Math.min(index, this.count() - 1));
-    this.element.scrollTop = scrollTopForIndex(clamped, this.itemSize(), this.layout().scale);
+  // -------------------------------------------------------------- source
+
+  /**
+   * Tell the scroller how many items there are and, optionally, how tall each
+   * is estimated to be. `dtVirtualFor` calls this for you.
+   */
+  setSource(count: number, resolver: SizeResolver | null = null): void {
+    // Anchor the first visible item across the rebuild so the view does not move.
+    const before = untracked(() => this.layout());
+    const oldCache = untracked(() => this.sizes());
+    const anchorIndex = before.first;
+    const anchorIntra = before.virtualTop - oldCache.offset(anchorIndex);
+
+    this.source.set({ count, resolver });
+
+    if (!this.sizer || count === 0 || anchorIndex >= count || this.pendingScroll) return;
+    const cache = untracked(() => this.sizes());
+    const after = untracked(() => this.layout());
+    const wanted = scrollTopForVirtual(cache.offset(anchorIndex) + anchorIntra, after.scale);
+    if (Math.abs(wanted - this.element.scrollTop) >= 0.5) this.setScrollTop(wanted);
+  }
+
+  /** Current size of item `index` (measured if known, otherwise the estimate). */
+  sizeOf(index: number): number {
+    return this.sizes().size(index);
+  }
+
+  /** Top of item `index` in virtual px. */
+  offsetOf(index: number): number {
+    return this.sizes().offset(index);
+  }
+
+  /** Item at a virtual pixel position. */
+  indexAt(virtualPx: number): number {
+    return this.sizes().indexAt(virtualPx);
+  }
+
+  // --------------------------------------------------------- measurement
+
+  /**
+   * Registers a function that measures rendered items and feeds them through
+   * `applySizes`. Called synchronously after every scroll so corrections land
+   * in the same frame. Returns an unregister function.
+   */
+  registerMeasurer(fn: () => boolean): () => void {
+    this.measurers.add(fn);
+    return () => this.measurers.delete(fn);
+  }
+
+  /**
+   * Feeds measured heights into the cache. Returns true when anything changed.
+   *
+   * Scroll correction: the first visible item is used as an anchor. After the
+   * cache is updated the scroll position is moved so that this item keeps its
+   * exact on-screen position, whatever changed above it (and whatever the new
+   * scrollbar scale is).
+   */
+  applySizes(entries: ReadonlyArray<MeasuredSize>): boolean {
+    const cache = untracked(() => this.sizes());
+    const before = untracked(() => this.layout());
+    const anchorIndex = before.first;
+    const anchorIntra = before.virtualTop - cache.offset(anchorIndex);
+
+    let changed = false;
+    for (const { index, size } of entries) {
+      if (cache.setMeasured(index, size) !== 0) changed = true;
+    }
+    if (!changed) return false;
+
+    this.sizeVersion.update((v) => v + 1);
+    const el = this.element;
+    const after = untracked(() => this.layout());
+
+    if (this.pendingScroll && performance.now() > this.pendingScroll.until) this.pendingScroll = null;
+    if (this.pendingScroll) {
+      // A scrollToIndex is still settling: re-aim at the (now better known) target.
+      const { index, options } = this.pendingScroll;
+      this.setScrollTop(this.targetFor(index, options, after));
+    } else if (anchorIndex < cache.count) {
+      const wanted = scrollTopForVirtual(cache.offset(anchorIndex) + anchorIntra, after.scale);
+      if (Math.abs(wanted - el.scrollTop) >= 0.5) this.setScrollTop(wanted);
+    }
+    this.pushGeometry();
+    return true;
+  }
+
+  // ----------------------------------------------------------- scrolling
+
+  /** Scroll so that item `index` is at the top of the body area (or aligned as requested). */
+  scrollToIndex(index: number, options: ScrollToIndexOptions = {}): void {
+    const count = untracked(() => this.count());
+    if (count === 0) return;
+    const clamped = Math.max(0, Math.min(index, count - 1));
+    // Keep re-aiming while the rows around the target are measured for the first time.
+    this.pendingScroll = { index: clamped, options, until: performance.now() + PENDING_SCROLL_MS };
+    this.setScrollTop(this.targetFor(clamped, options, untracked(() => this.layout())));
+  }
+
+  /** Scroll to a virtual (content) pixel position. */
+  scrollToOffset(virtualPx: number): void {
+    this.pendingScroll = null;
+    this.setScrollTop(scrollTopForVirtual(Math.max(0, virtualPx), untracked(() => this.layout()).scale));
   }
 
   scrollToTop(): void {
-    this.element.scrollTop = 0;
+    this.pendingScroll = null;
+    this.setScrollTop(0);
+  }
+
+  private targetFor(index: number, options: ScrollToIndexOptions, layout: VirtualLayout): number {
+    const cache = untracked(() => this.sizes());
+    const bodyView = Math.max(0, untracked(() => this.viewportHeight()) - untracked(() => this.headerSize()));
+    return scrollTopForVirtual(virtualTopForIndex(cache, index, bodyView, options), layout.scale);
+  }
+
+  private setScrollTop(value: number): void {
+    const el = this.element;
+    el.scrollTop = value;
+    this.lastProgrammaticTop = el.scrollTop;
+    this.scrollTop.set(el.scrollTop);
+  }
+
+  private pushGeometry(): void {
+    const sizer = this.sizer;
+    const content = this.content;
+    if (!sizer || !content) return;
+    const { sizerHeight, offset } = untracked(() => this.layout());
+    const width = untracked(() => this.contentWidth());
+    sizer.style.height = `${sizerHeight}px`;
+    sizer.style.width = width ? `${width}px` : '';
+    content.style.top = `${offset}px`;
+  }
+
+  private runMeasurers(): boolean {
+    if (!untracked(() => this.measure())) return false;
+    let changed = false;
+    for (const fn of this.measurers) if (fn()) changed = true;
+    return changed;
   }
 
   private attach(): void {
@@ -175,8 +352,12 @@ export class DtVirtualScroll {
 
     // --- scroll: render the new window in this frame, not after the scheduler
     const onScroll = () => {
-      this.scrollTop.set(el.scrollTop);
+      const top = el.scrollTop;
+      if (Math.abs(top - this.lastProgrammaticTop) > 1) this.pendingScroll = null; // the user took over
+      this.scrollTop.set(top);
       this.cdr.detectChanges();
+      // New rows are in the DOM: measure them now so a correction lands before paint.
+      if (this.runMeasurers()) this.cdr.detectChanges();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     this.destroyRef.onDestroy(() => el.removeEventListener('scroll', onScroll));
@@ -195,6 +376,7 @@ export class DtVirtualScroll {
     // --- sizes
     const measure = () => {
       this.viewportHeight.set(el.clientHeight);
+      this.viewportWidth.set(el.clientWidth);
       this.contentWidth.set(content.offsetWidth);
     };
     measure();

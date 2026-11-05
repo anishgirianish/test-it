@@ -4,10 +4,12 @@ import {
   ColumnDef,
   DataTableCellDef,
   DataTableComponent,
+  DataTableDetailDef,
   DataTableGroupDef,
   DataTableHeaderDef,
   RenderedRange,
   RowClickEvent,
+  RowHeightResolver,
   SortState,
 } from './data-table';
 import { InfoChip } from './demo/info-chip';
@@ -21,7 +23,16 @@ type GroupKey = 'sector' | 'region' | 'side' | 'status' | 'trader';
 
 @Component({
   selector: 'app-root',
-  imports: [DecimalPipe, DataTableComponent, DataTableCellDef, DataTableHeaderDef, DataTableGroupDef, PlainTableDemo, InfoChip],
+  imports: [
+    DecimalPipe,
+    DataTableComponent,
+    DataTableCellDef,
+    DataTableHeaderDef,
+    DataTableGroupDef,
+    DataTableDetailDef,
+    PlainTableDemo,
+    InfoChip,
+  ],
   templateUrl: './app.html',
   styleUrl: './app.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -50,6 +61,23 @@ export class App {
   readonly multiSort = signal(true);
   readonly recycleRows = signal(false);
   readonly rowHeight = signal(36);
+  /** Wrap the notes column and measure rows: every row gets its own height. */
+  readonly dynamicHeights = signal(false);
+  /** Show an expander in the # column and a detail row per trade. */
+  readonly expandable = signal(false);
+  readonly expanded = signal<ReadonlySet<unknown>>(new Set());
+  readonly groupRowHeight = signal(44);
+
+  /**
+   * Height estimate used before a row is measured. A long note is likely to
+   * wrap, so guess taller; the measured height replaces the guess once the
+   * row has been on screen.
+   */
+  readonly rowHeightEstimate = computed<number | RowHeightResolver<Trade>>(() => {
+    const base = this.rowHeight();
+    if (!this.dynamicHeights()) return base;
+    return (row) => (row.notes.length > 120 ? base + 54 : row.notes.length > 50 ? base + 18 : base);
+  });
 
   readonly groupOptions: GroupKey[] = ['sector', 'region', 'side', 'status', 'trader'];
   readonly groupBy = signal<GroupKey[]>([]);
@@ -62,10 +90,19 @@ export class App {
 
   readonly columns = computed<ColumnDef<Trade>[]>(() => {
     const sticky = this.stickyEnabled();
+    const wrap = this.dynamicHeights();
     const cols: ColumnDef<Trade>[] = [
-      { key: 'id', header: '#', type: 'number', width: 90, sticky: sticky ? 'start' : undefined },
+      {
+        key: 'id',
+        header: '#',
+        type: 'number',
+        width: this.expandable() ? 110 : 90,
+        sticky: sticky ? 'start' : undefined,
+        expander: this.expandable(),
+      },
       { key: 'symbol', header: 'Symbol', width: 110, sticky: sticky ? 'start' : undefined },
       { key: 'name', header: 'Name', width: 200 },
+      { key: 'notes', header: 'Notes', width: wrap ? 260 : 220, wrap, sortable: false },
       { key: 'sector', header: 'Sector', width: 130 },
       { key: 'region', header: 'Region', width: 110 },
       { key: 'side', header: 'Side', width: 90, align: 'center' },
@@ -166,6 +203,21 @@ export class App {
 
   onRowClick(e: RowClickEvent<Trade>): void {
     this.selected.set(e.row);
+  }
+
+  fillsOf(row: Trade): { qty: number; price: number }[] {
+    const out = [];
+    let left = row.qty;
+    for (let i = 0; i < row.fills; i++) {
+      const qty = i === row.fills - 1 ? left : Math.round(left / (row.fills - i));
+      left -= qty;
+      out.push({ qty, price: Math.round((row.price + (i - row.fills / 2) * 0.07) * 100) / 100 });
+    }
+    return out;
+  }
+
+  collapseRows(): void {
+    this.table().collapseAllRows();
   }
 
   onRange(r: RenderedRange): void {

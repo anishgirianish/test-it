@@ -18,6 +18,10 @@ export interface Trade {
   trader: string;
   account: string;
   fillPct: number;
+  /** Free text of very different lengths: empty, one line, or a paragraph. */
+  notes: string;
+  /** Number of partial fills; drives the height of the detail row. */
+  fills: number;
 }
 
 const SYMBOLS: [string, string, string][] = [
@@ -46,6 +50,18 @@ const REGIONS = ['Americas', 'EMEA', 'APAC'];
 const STATUSES: TradeStatus[] = ['Filled', 'Filled', 'Filled', 'Partial', 'Working', 'Cancelled', 'Rejected'];
 const TRADERS = ['A. Patel', 'B. Nguyen', 'C. Okafor', 'D. Schmidt', 'E. Rossi', 'F. Tanaka', 'G. Haddad', 'H. Larsen'];
 const ACCOUNTS = ['Core Equity', 'Growth', 'Income', 'Hedge Overlay', 'Index Tracker', 'Global Macro'];
+const PHRASES = [
+  'Client requested VWAP execution over the afternoon session.',
+  'Partial fill, remainder worked on the dark pool.',
+  'Compliance pre-cleared this trade against the restricted list.',
+  'Hedge for the options book; delta-neutral at inception.',
+  'Rebalance leg two of three for the quarterly index change.',
+  'Price improvement of 3 bps versus arrival.',
+  'Counterparty confirmed settlement T+1.',
+  'Order flagged for best-execution review due to size.',
+  'Crossed internally with the income desk.',
+  'Trader note: liquidity thin after the earnings release, slice sizes reduced.',
+];
 
 /** Small deterministic PRNG so every reload shows the same data. */
 function mulberry32(seed: number): () => number {
@@ -88,7 +104,20 @@ export function generateTrades(count: number, seed = 42): Trade[] {
       trader: pick(TRADERS),
       account: pick(ACCOUNTS),
       fillPct: status === 'Filled' ? 100 : status === 'Partial' ? Math.round(rnd() * 90) + 5 : 0,
+      notes: notes(rnd, pick),
+      fills: 1 + Math.floor(rnd() * 6),
     };
   }
   return out;
+}
+
+/** ~45% empty, ~35% one sentence, ~20% two to four sentences. */
+function notes(rnd: () => number, pick: <T>(arr: readonly T[]) => T): string {
+  const r = rnd();
+  if (r < 0.45) return '';
+  if (r < 0.8) return pick(PHRASES);
+  const n = 2 + Math.floor(rnd() * 3);
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) out.push(pick(PHRASES));
+  return out.join(' ');
 }

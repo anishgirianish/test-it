@@ -1,5 +1,5 @@
 import { Directive, inject, input, TemplateRef } from '@angular/core';
-import { CellContext, GroupContext, HeaderContext } from './data-table.types';
+import { CellContext, DetailContext, GroupContext, HeaderContext } from './data-table.types';
 
 /**
  * Custom cell content for a column:
@@ -47,6 +47,23 @@ export class DataTableGroupDef<T = unknown> {
   readonly template = inject<TemplateRef<GroupContext<T>>>(TemplateRef);
 
   static ngTemplateContextGuard<T>(_dir: DataTableGroupDef<T>, ctx: unknown): ctx is GroupContext<T> {
+    return true;
+  }
+}
+
+/**
+ * Content of the detail row shown under an expanded data row. Its height is
+ * free: the table measures it. Expansion is keyed by `trackBy`, so it survives
+ * sorting, grouping and scrolling.
+ *   <ng-template dtDetail [dtDetailOf]="rows" let-row let-index="index">
+ */
+@Directive({ selector: 'ng-template[dtDetail]' })
+export class DataTableDetailDef<T = unknown> {
+  /** Type-only helper, see `dtCellOf`. */
+  readonly of = input<readonly T[] | undefined>(undefined, { alias: 'dtDetailOf' });
+  readonly template = inject<TemplateRef<DetailContext<T>>>(TemplateRef);
+
+  static ngTemplateContextGuard<T>(_dir: DataTableDetailDef<T>, ctx: unknown): ctx is DetailContext<T> {
     return true;
   }
 }

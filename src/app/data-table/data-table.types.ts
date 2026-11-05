@@ -38,7 +38,23 @@ export interface ColumnDef<T = unknown> {
   aggregate?: AggregateKind | ((rows: readonly T[]) => unknown);
   cellClass?: string | ((row: T, value: unknown) => string | null | undefined);
   headerClass?: string;
+  /**
+   * Let cell text wrap onto several lines instead of clipping with an
+   * ellipsis. Rows then grow with their content; turn on `dynamicRowHeight`
+   * so the table measures them.
+   */
+  wrap?: boolean;
+  /** Render the expand/collapse control for detail rows in this column. */
+  expander?: boolean;
 }
+
+/**
+ * Estimated height of a data row before it is rendered. Return different
+ * values for different row kinds (e.g. rows with notes vs without). With
+ * `dynamicRowHeight` the estimate is replaced by the measured height once the
+ * row has been on screen.
+ */
+export type RowHeightResolver<T> = (row: T, index: number) => number;
 
 export const GROUP_ROW: unique symbol = Symbol('dt-group-row');
 
@@ -72,6 +88,14 @@ export interface CellContext<T> {
   column: ColumnDef<T>;
   /** Absolute index within the flattened, sorted, grouped row list. */
   index: number;
+  /** Whether this row's detail row is open. */
+  expanded: boolean;
+}
+
+/** Context of a `dtDetail` template, rendered in an extra row under an expanded data row. */
+export interface DetailContext<T> {
+  $implicit: T;
+  index: number;
 }
 
 export interface HeaderContext<T> {
@@ -97,8 +121,14 @@ export interface GroupToggleEvent<T> {
   expanded: boolean;
 }
 
+export interface RowExpandEvent<T> {
+  row: T;
+  expanded: boolean;
+}
+
 export type { VirtualRange as RenderedRange } from '../virtual-scroll/virtual-scroll.directive';
 
 export type CellTemplate<T> = TemplateRef<CellContext<T>>;
 export type HeaderTemplate<T> = TemplateRef<HeaderContext<T>>;
 export type GroupTemplate<T> = TemplateRef<GroupContext<T>>;
+export type DetailTemplate<T> = TemplateRef<DetailContext<T>>;

@@ -1,9 +1,10 @@
 <div
   class="dt-viewport"
   dtVirtualScroll
-  [itemSize]="rowHeight()"
+  [itemSize]="defaultRowHeight()"
   [headerSize]="headerHeight()"
   [buffer]="buffer()"
+  [measure]="dynamicRowHeight()"
   (rangeChange)="renderedRangeChange.emit($event)"
   tabindex="0"
   role="region"
@@ -12,6 +13,7 @@
   @let metas = columnMeta();
   @let total = rows().length;
   @let ind = indent();
+  @let detail = detailTemplate();
 
     <table
       class="dt-table"
@@ -76,18 +78,18 @@
 
       <tbody>
         @if (total === 0) {
-          <tr class="dt-row dt-empty-row" [style.height.px]="rowHeight()">
+          <tr class="dt-row dt-empty-row" [style.height.px]="defaultRowHeight()">
             <td [attr.colspan]="metas.length">{{ emptyMessage() }}</td>
           </tr>
         }
-        <ng-container *dtVirtualFor="let row of rows(); let abs = index; trackBy: rowTrackBy()">
+        <ng-container *dtVirtualFor="let row of rows(); let abs = index; trackBy: rowTrackBy(); itemSize: rowSize()">
           @if (isGroup(row)) {
             @let expanded = isExpanded(row);
             <tr
               class="dt-row dt-group-row"
               [class.dt-expanded]="expanded"
               [class.dt-odd]="abs % 2 === 1"
-              [style.height.px]="rowHeight()"
+              [style.height.px]="groupHeight()"
               [attr.aria-rowindex]="abs + 1"
               [attr.aria-level]="row.level + 1"
               [attr.aria-expanded]="expanded"
@@ -125,25 +127,50 @@
               }
             </tr>
           } @else {
+            @let rowExpanded = !!detail && isRowExpanded(row);
             <tr
               class="dt-row dt-data-row"
               [class.dt-odd]="abs % 2 === 1"
-              [style.height.px]="rowHeight()"
+              [class.dt-row-expanded]="rowExpanded"
+              [style.height.px]="dataRowHeight(row, abs)"
               [attr.aria-rowindex]="abs + 1"
+              [attr.aria-expanded]="detail ? rowExpanded : null"
               (click)="onRowClick(row, abs, $event)"
             >
               @for (m of metas; track m.column.key) {
                 @let value = cellValue(row, m.column);
                 @let ct = cellTemplate(m.column.key);
                 <td [class]="cellClasses(m, row, value)" [style.left.px]="m.left" [style.right.px]="m.right">
+                  @if (m.column.expander && detail) {
+                    <button
+                      type="button"
+                      class="dt-toggle dt-expander"
+                      [attr.aria-label]="rowExpanded ? 'Collapse row' : 'Expand row'"
+                      [attr.aria-expanded]="rowExpanded"
+                      (click)="toggleRowExpanded(row, $event)"
+                    >
+                      <span class="dt-caret" [class.dt-caret--open]="rowExpanded"></span>
+                    </button>
+                  }
                   @if (ct) {
-                    <ng-container *ngTemplateOutlet="ct; context: { $implicit: row, value: value, column: m.column, index: abs }" />
+                    <ng-container
+                      *ngTemplateOutlet="ct; context: { $implicit: row, value: value, column: m.column, index: abs, expanded: rowExpanded }"
+                    />
                   } @else {
                     {{ cellText(value, m.column, row) }}
                   }
                 </td>
               }
             </tr>
+            @if (rowExpanded) {
+              <tr class="dt-row dt-detail-row" [attr.aria-rowindex]="abs + 1">
+                <td class="dt-detail-cell" [attr.colspan]="metas.length">
+                  <div class="dt-detail" [style.width.px]="viewportWidth()">
+                    <ng-container *ngTemplateOutlet="detail; context: { $implicit: row, index: abs }" />
+                  </div>
+                </td>
+              </tr>
+            }
           }
         </ng-container>
       </tbody>

@@ -35,6 +35,11 @@
       <label class="control check"><input type="checkbox" [checked]="striped()" (change)="striped.set(!striped())" /> Striped</label>
       <label class="control check"><input type="checkbox" [checked]="multiSort()" (change)="multiSort.set(!multiSort())" /> Multi-sort (shift+click)</label>
       <label class="control check" title="On: DOM rows are reused by slot (fastest). Off: rows are keyed by id so stateful cell components travel with their data."><input type="checkbox" [checked]="recycleRows()" (change)="recycleRows.set(!recycleRows())" /> Recycle rows</label>
+      <label class="control check" title="Wrap the Notes column and measure every rendered row; heights are cached in a Fenwick tree and the scroll position is corrected as estimates are refined."><input type="checkbox" [checked]="dynamicHeights()" (change)="dynamicHeights.set(!dynamicHeights())" /> Dynamic row heights</label>
+      <label class="control check" title="Expander in the # column opens a detail row of variable height under the trade."><input type="checkbox" [checked]="expandable()" (change)="expandable.set(!expandable())" /> Expandable rows</label>
+      @if (expandable() && expanded().size) {
+        <button type="button" class="btn" (click)="collapseRows()">Collapse {{ expanded().size }} row{{ expanded().size === 1 ? '' : 's' }}</button>
+      }
     </div>
 
     <div class="toolbar__row">
@@ -70,7 +75,10 @@
     [groupBy]="groupBy()"
     [(sort)]="sort"
     [multiSort]="multiSort()"
-    [rowHeight]="rowHeight()"
+    [rowHeight]="rowHeightEstimate()"
+    [groupRowHeight]="groupRowHeight()"
+    [dynamicRowHeight]="dynamicHeights() || expandable()"
+    [(expanded)]="expanded"
     [striped]="striped()"
     [trackBy]="trackById"
     [recycleRows]="recycleRows()"
@@ -115,6 +123,27 @@
         <button type="button" class="icon-btn" title="Edit" (click)="action('edit', row, $event)">✎</button>
         <button type="button" class="icon-btn" title="Cancel" (click)="action('cancel', row, $event)">✕</button>
       </span>
+    </ng-template>
+
+    <!-- Detail row: any height, measured by the table, pinned horizontally to the viewport -->
+    <ng-template dtDetail [dtDetailOf]="data()" let-row let-index="index">
+      <div class="detail">
+        <div class="detail__head">
+          <strong>{{ row.symbol }}</strong> {{ row.name }} · {{ row.side }} {{ row.qty | number }} @ {{ row.price | number: '1.2-2' }}
+          <span class="muted">· {{ row.trader }} · {{ row.account }} · row {{ index | number }}</span>
+        </div>
+        @if (row.notes) {
+          <p class="detail__notes">{{ row.notes }}</p>
+        }
+        <table class="detail__fills">
+          <thead><tr><th>Fill</th><th>Qty</th><th>Price</th></tr></thead>
+          <tbody>
+            @for (f of fillsOf(row); track $index) {
+              <tr><td>{{ $index + 1 }}</td><td>{{ f.qty | number }}</td><td>{{ f.price | number: '1.2-2' }}</td></tr>
+            }
+          </tbody>
+        </table>
+      </div>
     </ng-template>
 
     <!-- Custom header -->

@@ -13,11 +13,12 @@ import {
   untracked,
   viewChild,
 } from '@angular/core';
-import { DtVirtualFor, DtVirtualScroll } from '../virtual-scroll';
-import { DataTableCellDef, DataTableGroupDef, DataTableHeaderDef } from './data-table.defs';
+import { DtVirtualFor, DtVirtualScroll, ScrollToIndexOptions } from '../virtual-scroll';
+import { DataTableCellDef, DataTableDetailDef, DataTableGroupDef, DataTableHeaderDef } from './data-table.defs';
 import {
   CellTemplate,
   ColumnDef,
+  DetailTemplate,
   GroupRow,
   GroupTemplate,
   GroupToggleEvent,
@@ -25,6 +26,8 @@ import {
   isGroupRow,
   RenderedRange,
   RowClickEvent,
+  RowExpandEvent,
+  RowHeightResolver,
   SortState,
   TableRow,
 } from './data-table.types';
@@ -39,6 +42,10 @@ import {
 } from './data-table.utils';
 
 const DEFAULT_COLUMN_WIDTH = 160;
+const DEFAULT_ROW_HEIGHT = 36;
+
+/** Estimated height of one flattened row (group or data), used by the virtual scroller. */
+type RowSizeResolver<T> = (row: TableRow<T>, index: number) => number;
 
 interface ColumnMeta<T> {
   column: ColumnDef<T>;
@@ -71,7 +78,22 @@ export class DataTableComponent<T> {
   readonly multiSort = input(true);
   /** Set to false for server-side sorting: the table emits `sort` but leaves data order alone. */
   readonly clientSort = input(true);
-  readonly rowHeight = input(36);
+  /**
+   * Height of a data row in px, or a resolver returning an estimate per row.
+   * With `dynamicRowHeight` on, this is only the first guess; rows are measured
+   * once rendered.
+   */
+  readonly rowHeight = input<number | RowHeightResolver<T>>(DEFAULT_ROW_HEIGHT);
+  /** Height of group rows. Defaults to the data row height. */
+  readonly groupRowHeight = input<number | null>(null);
+  /** Estimated height of a detail row (the real height is measured). */
+  readonly detailRowHeight = input(120);
+  /**
+   * Measure rendered rows and let them be any height: wrapped text, images,
+   * expanded detail rows, cells hosting components you do not control.
+   * Off, every row is exactly `rowHeight` / `groupRowHeight` tall.
+   */
+  readonly dynamicRowHeight = input(false);
   readonly headerHeight = input(40);
   /** CSS height of the component. The viewport fills it. */
   readonly height = input('100%');
@@ -88,16 +110,25 @@ export class DataTableComponent<T> {
    */
   readonly recycleRows = input(true);
   readonly emptyMessage = input('No rows to display');
+  /**
+   * Keys (from `trackBy`, or the row objects themselves) of rows whose detail
+   * row is open. Two-way bindable. Needs a `dtDetail` template.
+   */
+  readonly expanded = model<ReadonlySet<unknown>>(new Set());
+  /** Toggle the detail row when a data row is clicked (besides any `expander` column). */
+  readonly expandOnRowClick = input(false);
 
   // --------------------------------------------------------------- outputs
   readonly rowClick = output<RowClickEvent<T>>();
   readonly groupToggle = output<GroupToggleEvent<T>>();
+  readonly rowExpand = output<RowExpandEvent<T>>();
   readonly renderedRangeChange = output<RenderedRange>();
 
   // --------------------------------------------------------------- content
   private readonly cellDefs = contentChildren(DataTableCellDef<T>);
   private readonly headerDefs = contentChildren(DataTableHeaderDef<T>);
   private readonly groupDefs = contentChildren(DataTableGroupDef<T>);
+  private readonly detailDefs = contentChildren(DataTableDetailDef<T>);
 
   private readonly cellTemplates = computed(
     () => new Map<string, CellTemplate<T>>(this.cellDefs().map((d) => [d.key(), d.template])),
@@ -109,8 +140,48 @@ export class DataTableComponent<T> {
     () => new Map<string, GroupTemplate<T>>(this.groupDefs().map((d) => [d.key(), d.template])),
   );
 
+  readonly detailTemplate = computed<DetailTemplate<T> | null>(() => this.detailDefs()[0]?.template ?? null);
+
   // ---------------------------------------------------------- scrolling
   private readonly viewport = viewChild.required(DtVirtualScroll);
+  private readonly viewportOptional = viewChild(DtVirtualScroll);
+  /** Width of the scroll viewport; detail panels are pinned to it horizontally. */
+  readonly viewportWidth = computed(() => this.viewportOptional()?.viewportWidth() || null);
+
+  // ---------------------------------------------------------- row sizes
+  /** Constant used by the scroller as the default estimate and for the placeholder lines. */
+  readonly defaultRowHeight = computed(() => {
+    const rh = this.rowHeight();
+    return typeof rh === 'number' ? rh : DEFAULT_ROW_HEIGHT;
+  });
+  readonly groupHeight = computed(() => this.groupRowHeight() ?? this.defaultRowHeight());
+
+  /** Row identity used for expansion state. */
+  private readonly rowKey = computed<(row: T) => unknown>(() => {
+    const fn = this.trackBy();
+    return fn ? fn : (row) => row;
+  });
+
+  /**
+   * Per-row height estimate handed to `*dtVirtualFor`. Null when every row has
+   * the same height, which keeps the scroller on its allocation-free fast path.
+   */
+  readonly rowSize = computed<RowSizeResolver<T> | null>(() => {
+    const rh = this.rowHeight();
+    const gh = this.groupHeight();
+    const dh = this.detailRowHeight();
+    const expanded = this.expanded();
+    const key = this.rowKey();
+    const hasDetail = this.detailTemplate() !== null;
+    const grouped = this.groupDepth() > 0;
+    const uniform = typeof rh === 'number' && (!grouped || gh === rh) && (!hasDetail || expanded.size === 0);
+    if (uniform) return null;
+    return (row, index) => {
+      if (isGroupRow(row)) return gh;
+      const base = typeof rh === 'number' ? rh : rh(row, index);
+      return hasDetail && expanded.has(key(row)) ? base + dh : base;
+    };
+  });
 
   // --------------------------------------------------------- group state
   /** Baseline expansion; flips when expandAll()/collapseAll() are called. */
@@ -153,6 +224,7 @@ export class DataTableComponent<T> {
         classes.push('dt-sticky', 'dt-sticky-end');
         if (i === ordered.length - end.length) classes.push('dt-sticky-end-first');
       }
+      if (column.wrap) classes.push('dt-wrap');
       const base = classes.join(' ');
       return {
         column,
@@ -254,9 +326,22 @@ export class DataTableComponent<T> {
     return this.viewport().element;
   }
 
-  /** Scrolls so that the row at `index` (in the flattened list) is at the top. */
-  scrollToIndex(index: number): void {
-    this.viewport().scrollToIndex(index);
+  /** Scrolls so that the row at `index` (in the flattened list) is at the top, or aligned as requested. */
+  scrollToIndex(index: number, options?: ScrollToIndexOptions): void {
+    this.viewport().scrollToIndex(index, options);
+  }
+
+  /** Scrolls to the first data row matching `predicate`. Returns its index, or -1. */
+  scrollToRow(predicate: (row: T) => boolean, options?: ScrollToIndexOptions): number {
+    const rows = this.rows();
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!isGroupRow(row) && predicate(row)) {
+        this.scrollToIndex(i, options);
+        return i;
+      }
+    }
+    return -1;
   }
 
   scrollToTop(): void {
@@ -305,6 +390,31 @@ export class DataTableComponent<T> {
     this.groupToggle.emit({ group, expanded: this.isExpanded(group) });
   }
 
+  // --------------------------------------------------------- detail rows
+  isRowExpanded(row: T): boolean {
+    return this.expanded().has(this.rowKey()(row));
+  }
+
+  toggleRowExpanded(row: T, event?: Event): void {
+    event?.stopPropagation();
+    this.setRowExpanded(row, !this.isRowExpanded(row));
+  }
+
+  setRowExpanded(row: T, expanded: boolean): void {
+    const key = this.rowKey()(row);
+    const current = this.expanded();
+    if (current.has(key) === expanded) return;
+    const next = new Set(current);
+    if (expanded) next.add(key);
+    else next.delete(key);
+    this.expanded.set(next);
+    this.rowExpand.emit({ row, expanded });
+  }
+
+  collapseAllRows(): void {
+    if (this.expanded().size) this.expanded.set(new Set());
+  }
+
   // ------------------------------------------------------- template helpers
   readonly isGroup = isGroupRow;
 
@@ -340,6 +450,12 @@ export class DataTableComponent<T> {
   groupTemplate(key: string): GroupTemplate<T> | null {
     const map = this.groupTemplates();
     return map.get(key) ?? map.get('') ?? null;
+  }
+
+  /** Estimated height of a data row; the `<tr>` gets it as a minimum height. */
+  dataRowHeight(row: TableRow<T>, index: number): number {
+    const rh = this.rowHeight();
+    return typeof rh === 'number' ? rh : rh(row as T, index);
   }
 
   cellValue(row: TableRow<T>, column: ColumnDef<T>): unknown {
@@ -388,6 +504,7 @@ export class DataTableComponent<T> {
       this.toggleGroup(row);
       return;
     }
+    if (this.expandOnRowClick() && this.detailTemplate()) this.toggleRowExpanded(row);
     this.rowClick.emit({ row, index, event });
   }
 }
