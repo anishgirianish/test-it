@@ -61,6 +61,27 @@ export class DtVirtualFor<T> {
     alias: 'dtVirtualForItemSize',
   });
 
+  /**
+   * `trackBy` mode only: how many views whose item left the window are kept
+   * for reuse instead of being destroyed. 0 (default) = destroy them.
+   *
+   * With a cache, an item entering the window takes a kept view and only gets
+   * a new context, so components inside a row are created once and afterwards
+   * just receive new inputs. Rows that stay in the window are not touched.
+   * Use it when rows contain components that are expensive to create.
+   * Components in a reused view keep their internal state, so anything open
+   * (a popover, an editor) should close when its inputs change.
+   *
+   *   <tr *dtVirtualFor="let row of rows; trackBy: byId; cacheSize: 40">
+   */
+  readonly cacheSize = input(0, { alias: 'dtVirtualForCacheSize' });
+  /**
+   * A kept view is only reused for an item with the same cache key. Give the
+   * row type here when rows of different types have different markup (group
+   * rows vs data rows), so a view is never rebuilt inside to fit another type.
+   */
+  readonly cacheBy = input<((item: T) => unknown) | undefined>(undefined, { alias: 'dtVirtualForCacheBy' });
+
   private readonly scroller = inject(DtVirtualScroll);
   private readonly vcr = inject(ViewContainerRef);
   private readonly template = inject<TemplateRef<DtVirtualForContext<T>>>(TemplateRef);
@@ -68,6 +89,10 @@ export class DtVirtualFor<T> {
 
   /** Views by key; only used in `trackBy` mode. */
   private keyed = new Map<unknown, EmbeddedViewRef<DtVirtualForContext<T>>>();
+  /** Detached views kept for reuse, by cache key; only used with `cacheSize`. */
+  private readonly cache = new Map<unknown, EmbeddedViewRef<DtVirtualForContext<T>>[]>();
+  private cached = 0;
+  private readonly cacheKeys = new WeakMap<EmbeddedViewRef<DtVirtualForContext<T>>, unknown>();
   private resizeObserver: ResizeObserver | null = null;
   private observed = new Set<Element>();
 
@@ -84,6 +109,8 @@ export class DtVirtualFor<T> {
       const items = this.items();
       const { start, end } = this.scroller.layout();
       const trackBy = this.trackBy();
+      this.cacheSize();
+      this.cacheBy();
       untracked(() => (trackBy ? this.renderKeyed(items, start, end, trackBy) : this.renderSlots(items, start, end)));
     });
 
@@ -92,6 +119,7 @@ export class DtVirtualFor<T> {
     afterEveryRender({ read: () => this.measure() });
     this.destroyRef.onDestroy(this.scroller.registerMeasurer(() => this.measure()));
     this.destroyRef.onDestroy(() => this.resizeObserver?.disconnect());
+    this.destroyRef.onDestroy(() => this.clearCache());
   }
 
   static ngTemplateContextGuard<T>(_dir: DtVirtualFor<T>, ctx: unknown): ctx is DtVirtualForContext<T> {
@@ -152,6 +180,7 @@ export class DtVirtualFor<T> {
       this.vcr.clear();
       this.keyed.clear();
     }
+    this.clearCache();
     const needed = Math.max(0, end - start);
     const vcr = this.vcr;
     while (vcr.length > needed) vcr.remove(vcr.length - 1);
@@ -183,16 +212,17 @@ export class DtVirtualFor<T> {
       wanted.push(key);
     }
 
-    // Drop views whose item left the window.
+    // Views whose item left the window: keep them for reuse, or destroy them.
+    // This runs before placing, so a row entering in this same pass can take
+    // the view of a row that is leaving.
+    const cacheSize = Math.max(0, this.cacheSize());
+    const cacheBy = cacheSize > 0 ? this.cacheBy() : undefined;
+    if (cacheSize === 0) this.clearCache();
     for (const [key, view] of previous) {
-      if (!next.has(key)) {
-        const at = vcr.indexOf(view);
-        if (at !== -1) vcr.remove(at);
-        else view.destroy();
-      }
+      if (!next.has(key)) this.release(view, cacheSize);
     }
 
-    // Place or create, in window order.
+    // Place, reuse or create, in window order.
     const placed = new Map<unknown, EmbeddedViewRef<DtVirtualForContext<T>>>();
     for (let slot = 0; slot < wanted.length; slot++) {
       const key = wanted[slot];
@@ -203,11 +233,45 @@ export class DtVirtualFor<T> {
         Object.assign(view.context, ctx);
         view.markForCheck();
       } else {
-        view = vcr.createEmbeddedView(this.template, ctx, { index: slot });
+        const cacheKey = cacheBy ? cacheBy(items[start + slot]) : undefined;
+        view = cacheSize > 0 ? (this.cache.get(cacheKey)?.pop() ?? null) : null;
+        if (view) {
+          this.cached--;
+          Object.assign(view.context, ctx);
+          vcr.insert(view, slot);
+          view.markForCheck();
+        } else {
+          view = vcr.createEmbeddedView(this.template, ctx, { index: slot });
+          this.cacheKeys.set(view, cacheKey);
+        }
       }
       placed.set(key, view);
     }
     while (vcr.length > wanted.length) vcr.remove(vcr.length - 1);
     this.keyed = placed;
+  }
+
+  /** Takes a view out of the container: into the cache when there is room, otherwise destroyed. */
+  private release(view: EmbeddedViewRef<DtVirtualForContext<T>>, cacheSize: number): void {
+    const at = this.vcr.indexOf(view);
+    if (at === -1) {
+      view.destroy();
+    } else if (this.cached < cacheSize) {
+      this.vcr.detach(at);
+      const cacheKey = this.cacheKeys.get(view);
+      const kept = this.cache.get(cacheKey);
+      if (kept) kept.push(view);
+      else this.cache.set(cacheKey, [view]);
+      this.cached++;
+    } else {
+      this.vcr.remove(at);
+    }
+  }
+
+  private clearCache(): void {
+    if (this.cached === 0) return;
+    for (const views of this.cache.values()) for (const view of views) view.destroy();
+    this.cache.clear();
+    this.cached = 0;
   }
 }
